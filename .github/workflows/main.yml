@@ -1,0 +1,147 @@
+name: CR Issue State Machine
+ 
+on:
+  issues:
+    types: [opened, labeled, unlabeled, closed]
+  push:
+    branches:
+      - main  # Adjust to the branch you’re using for the code push
+ 
+jobs:
+  cr_state_machine:
+    runs-on: ubuntu-latest
+ 
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+ 
+    - name: Install GitHub CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gh
+ 
+    - name: Login to GitHub CLI
+      run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+ 
+    - name: Transition on Issue Open
+      if: github.event.action == 'opened'
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Review" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --remove-label "Closed" --add-label "Submit"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Review on Label
+      if: contains(github.event.issue.labels.*.name, 'Submit') && contains(github.event.issue.labels.*.name, 'Review') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --remove-label "Closed" --add-label "Review"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Analysis on Review Approval
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Review') && contains(github.event.issue.labels.*.name, 'Analysis') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --remove-label "Closed" --add-label "Analysis"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Commit on Analysis Completion
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Analysis') && contains(github.event.issue.labels.*.name, 'Commit') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Analysis" --remove-label "Implement" --remove-label "Verification" --remove-label "Closed" --add-label "Commit"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Implement on Commit
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Commit') && contains(github.event.issue.labels.*.name, 'Implement') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Analysis" --remove-label "Commit" --remove-label "Verification" --remove-label "Closed" --add-label "Implement"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Verification on Implement
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Implement') && contains(github.event.issue.labels.*.name, 'Verification') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Closed" --add-label "Verification"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Transition to Closed on Verification
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Verification') && contains(github.event.issue.labels.*.name, 'Closed') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --add-label "Closed"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Handle Decline
+      if: github.event.action == 'labeled' && contains(github.event.issue.labels.*.name, 'Decline') && !contains(github.event.issue.labels.*.name, 'Commit') && !contains(github.event.issue.labels.*.name, 'Submit') && !contains(github.event.issue.labels.*.name, 'Closed')
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Submit" --remove-label "Review" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --add-label "Decline"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Reopen issue
+      if: contains(github.event.issue.labels.*.name, 'Submit') && contains(github.event.issue.labels.*.name, 'Decline') 
+      run: |
+        gh issue edit ${{ github.event.issue.number }} --remove-label "Decline" --remove-label "Analysis" --remove-label "Commit" --remove-label "Implement" --remove-label "Verification" --remove-label "Closed" 
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+    - name: Ensure Only One Label
+      run: |
+        # Retrieve the issue number from the GitHub event
+        issue_number="${{ github.event.issue.number }}"
+ 
+        # Exit if issue_number is empty
+        if [ -z "$issue_number" ]; then
+          echo "No issue number found. Skipping label check."
+          exit 0
+        fi
+ 
+        # Get the labels for the issue
+        labels=($(gh issue view "$issue_number" --json labels --jq '.labels[].name'))
+ 
+        # Check if there are multiple labels and remove the latest if so
+        if [ ${#labels[@]} -gt 1 ]; then
+          latest_label="${labels[-1]}"
+          gh issue edit "$issue_number" --remove-label "$latest_label"
+          echo "Removed label $latest_label from issue #$issue_number to ensure only one label remains."
+        else
+          echo "Only one label present for issue #$issue_number. No action needed."
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+ 
+ 
+  transition_on_push:
+    runs-on: ubuntu-latest
+    # Removed the dependency `needs: cr_state_machine` to allow independent execution on `push`
+    if: github.event_name == 'push'
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+ 
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+ 
+      - name: Login to GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+ 
+      - name: Transition to Verification on Code Push
+        run: |
+          # Find the issue with the label "Implement"
+          issue_number=$(gh issue list --label "Implement" --json number --jq '.[0].number')
+          if [ -n "$issue_number" ]; then
+            # Transition from "Implement" to "Verification"
+            gh issue edit "$issue_number" --remove-label "Implement" --add-label "Verification"
+            echo "Transitioned issue #$issue_number from Implement to Verification."
+          else
+            echo "No issue with the 'Implement' label found."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+ 
